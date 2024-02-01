@@ -23,6 +23,8 @@ struct {
   struct run *freelist;
 } kmem;
 
+int pageref[PGINDEX(PHYSTOP)];
+
 void
 kinit()
 {
@@ -51,6 +53,9 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  if(--pageref[PGINDEX(pa)] > 0)
+    return;
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -76,7 +81,37 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
+    pageref[PGINDEX(r)] = 1;
+  }
   return (void*)r;
+}
+
+// Copy-on-write allocation.
+// Returns 0 on success, -1 on error.
+int
+cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  uint64 pa, mem;
+  pte_t *pte;
+  int flags;
+
+  va = PGROUNDDOWN(va);
+  if(va >= MAXVA) return -1;
+  pte = walk(pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0) return -1;
+  *pte = (*pte & ~PTE_COW) | PTE_W;
+  pa = PTE2PA(*pte);
+  if(pageref[PGINDEX(pa)] <= 1) return 0;
+  flags = PTE_FLAGS(*pte);
+  mem = (uint64)kalloc();
+  if(mem == 0) return -1;
+  memmove((char *)mem, (char *)pa, PGSIZE);
+  uvmunmap(pagetable, va, 1, 1);
+  if(mappages(pagetable, va, PGSIZE, mem, flags) < 0){
+    kfree((void *)mem);
+    return -1;
+  }
+  return 0;
 }
