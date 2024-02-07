@@ -1,6 +1,8 @@
 #ifdef LAB_MMAP
 typedef unsigned long size_t;
 typedef long int off_t;
+void *mmap(void *, size_t, int, int, int, off_t);
+int munmap(void *, size_t);
 #endif
 struct stat;
 

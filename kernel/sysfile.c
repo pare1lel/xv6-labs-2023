@@ -503,3 +503,90 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  int len, prot, flags, fd, offset, i;
+  struct file *f;
+  struct proc *p = myproc();
+
+  if (argfd(4, &fd, &f) < 0)
+    return -1;
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(5, &offset);
+
+  if (!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return -1;
+  len = PGROUNDUP(len);
+  for (i = 0; i < NOVMA && p->vma[i].valid; i++);
+  if (i == NOVMA)
+    return -1;
+  p->vma[i].valid = 1;
+  p->vma[i].len = len;
+  p->vma[i].prot = prot;
+  p->vma[i].flags = flags;
+  p->vma[i].offset = offset;
+  p->vma[i].addr = p->sz;
+  p->vma[i].f = f;
+  filedup(f);
+  p->sz += len;
+  return p->vma[i].addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int i, len;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argint(1, &len);
+  for (i = 0; i < NOVMA && (p->vma[i].valid == 0 || addr != p->vma[i].addr); i++);
+  if (i == NOVMA || len > p->vma[i].len || len % PGSIZE != 0)
+    return -1;
+  if (p->vma[i].flags & MAP_SHARED)
+    filewrite(p->vma[i].f, addr, len);
+  uvmunmap(p->pagetable, addr, len / PGSIZE, 1);
+  p->vma[i].addr += len;
+  p->vma[i].len -= len;
+  p->vma[i].offset += len;
+  if (p->vma[i].len == 0) {
+    fileclose(p->vma[i].f);
+    p->vma[i].valid = 0;
+  }
+  return 0;
+}
+
+// Mmap allocation.
+// Returns 0 on success, -1 on error.
+int
+mmapalloc(uint64 va)
+{
+  int i, offset, prot;
+  struct proc *p = myproc();
+  uint64 mem;
+
+  va = PGROUNDDOWN(va);
+  for (i = 0; i < NOVMA && (p->vma[i].valid == 0 || va < p->vma[i].addr
+           || va >= p->vma[i].addr + p->vma[i].len); i++);
+  if (i == NOVMA || (mem = (uint64)kalloc()) == 0)
+    return -1;
+  offset = va - p->vma[i].addr + p->vma[i].offset;
+  memset((void *)mem, 0, PGSIZE);
+  ilock(p->vma[i].f->ip);
+  readi(p->vma[i].f->ip, 0, mem, offset, PGSIZE);
+  iunlock(p->vma[i].f->ip);
+  prot = PTE_U;
+  if (p->vma[i].prot & PROT_READ)  { prot |= PTE_R; }
+  if (p->vma[i].prot & PROT_WRITE) { prot |= PTE_W; }
+  if (p->vma[i].prot & PROT_EXEC)  { prot |= PTE_X; }
+  if (mappages(p->pagetable, va, PGSIZE, mem, prot) < 0) {
+    kfree((void *)mem);
+    return -1;
+  }
+  return 0;
+}

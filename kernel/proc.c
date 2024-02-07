@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -143,6 +144,7 @@ found:
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
+  memset(p->vma, 0, sizeof(p->vma));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
@@ -298,6 +300,11 @@ fork(void)
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
+  for(i = 0; i < NOVMA; i++)
+    if(p->vma[i].valid){
+      filedup(p->vma[i].f);
+      np->vma[i] = p->vma[i];
+    }
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
@@ -359,6 +366,15 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+  for(int i = 0; i < NOVMA; i++)
+    if(p->vma[i].valid){
+      if(p->vma[i].flags & MAP_SHARED)
+        filewrite(p->vma[i].f, p->vma[i].addr, p->vma[i].len);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].len / PGSIZE, 1);
+      fileclose(p->vma[i].f);
+      p->vma[i].valid = 0;
+    }
 
   begin_op();
   iput(p->cwd);
